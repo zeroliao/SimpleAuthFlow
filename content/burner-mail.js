@@ -79,6 +79,15 @@ function normalizeText(value) {
   return (value || '').replace(/\s+/g, ' ').trim();
 }
 
+function decodeHtmlEntities(value) {
+  const source = value || '';
+  if (!/&(?:lt|gt|quot|amp|#\d+|#x[0-9a-f]+);/i.test(source)) return source;
+
+  const textarea = document.createElement('textarea');
+  textarea.innerHTML = source;
+  return textarea.value;
+}
+
 function extractEmail(value) {
   return normalizeText(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || '';
 }
@@ -94,6 +103,113 @@ function extractVerificationCode(text) {
 
   const match6 = source.match(/\b(\d{6})\b/);
   if (match6) return match6[1];
+
+  return null;
+}
+
+function extractOpenAIVerificationCode(text, options = {}) {
+  const source = normalizeText(text || '');
+  const { allowLoose = false } = options;
+  const isLikelyNoiseCode = (code) => code === '202123' || /^(\d)\1{5}$/.test(code);
+
+  const strongPatterns = [
+    /(?:openai|chatgpt|verification|verify|confirmation|login|security|code|验证码|驗證碼|代码|代碼)[^0-9]{0,120}(\d{6})/i,
+    /(\d{6})[^0-9]{0,120}(?:openai|chatgpt|verification|verify|confirmation|login|security|code|验证码|驗證碼|代码|代碼)/i,
+    /(?:code|验证码|驗證碼|代码|代碼)\s*(?:is|:|：)?\s*(\d{6})/i,
+  ];
+
+  for (const pattern of strongPatterns) {
+    const match = source.match(pattern);
+    if (match?.[1] && !isLikelyNoiseCode(match[1])) return match[1];
+  }
+
+  if (!allowLoose) return null;
+
+  const looseMatches = [...source.matchAll(/\b(\d{6})\b/g)].map(match => match[1]);
+  return looseMatches.find(code => !/^20\d{4}$/.test(code) && !isLikelyNoiseCode(code)) || null;
+}
+
+function parseHtmlDocument(value) {
+  const decoded = decodeHtmlEntities(value || '');
+  if (!/<[a-z][\s\S]*>/i.test(decoded)) return null;
+
+  const htmlMatch = decoded.match(/<html[\s\S]*<\/html>/i);
+  const html = htmlMatch ? htmlMatch[0] : decoded;
+  return new DOMParser().parseFromString(html, 'text/html');
+}
+
+function getReadableDocumentText(doc) {
+  if (!doc) return '';
+
+  const clone = doc.cloneNode(true);
+  clone.querySelectorAll('head, style, script, noscript, svg').forEach(el => el.remove());
+  return normalizeText(clone.body?.innerText || clone.body?.textContent || '');
+}
+
+function extractCodeFromHtmlDocument(doc) {
+  if (!doc?.body) return null;
+
+  const cleanDoc = doc.cloneNode(true);
+  cleanDoc.querySelectorAll('head, style, script, noscript, svg').forEach(el => el.remove());
+
+  for (const el of cleanDoc.body.querySelectorAll('p, td, div, span, strong, b')) {
+    const text = normalizeText(el.textContent || '');
+    const exactMatch = text.match(/^(\d{6})$/);
+    if (exactMatch && exactMatch[1] !== '202123' && !/^(\d)\1{5}$/.test(exactMatch[1])) {
+      return exactMatch[1];
+    }
+  }
+
+  return extractOpenAIVerificationCode(getReadableDocumentText(cleanDoc), { allowLoose: true });
+}
+
+function extractCodeFromHtmlValue(value) {
+  const doc = parseHtmlDocument(value);
+  return doc ? extractCodeFromHtmlDocument(doc) : null;
+}
+
+function extractCodeFromEmailFrame(frame) {
+  try {
+    const frameCode = extractCodeFromHtmlDocument(frame.contentDocument);
+    if (frameCode) return frameCode;
+  } catch (err) {
+    console.debug(BURNER_PREFIX, 'Unable to read email iframe document:', err?.message || err);
+  }
+
+  const srcdoc = frame.getAttribute('srcdoc');
+  return srcdoc ? extractCodeFromHtmlValue(srcdoc) : null;
+}
+
+function getOpenMessageDetail(rowId) {
+  const detailRoot = rowId
+    ? document.querySelector(`#message-${CSS.escape(rowId)}`)
+    : document.querySelector('.mailbox .message');
+  const emailFrame = detailRoot?.querySelector('iframe.tm-email-frame, iframe[srcdoc]')
+    || document.querySelector('.mailbox .message iframe.tm-email-frame, .mailbox .message iframe[srcdoc]');
+  const detailTextarea = (rowId ? document.querySelector(`#message-${CSS.escape(rowId)} textarea`) : null)
+    || detailRoot?.querySelector('textarea')
+    || document.querySelector('.message textarea');
+
+  return { detailRoot, emailFrame, detailTextarea };
+}
+
+async function waitForDetailCode(rowId, timeout = 4000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const { detailRoot, emailFrame, detailTextarea } = getOpenMessageDetail(rowId);
+    const frameCode = emailFrame ? extractCodeFromEmailFrame(emailFrame) : null;
+    if (frameCode) return frameCode;
+
+    const detailText = detailTextarea?.value || detailTextarea?.textContent || detailRoot?.textContent || '';
+    const detailCode = extractCodeFromHtmlValue(detailText)
+      || extractOpenAIVerificationCode(detailText, { allowLoose: true });
+    if (detailCode) return detailCode;
+
+    await sleep(200);
+  }
 
   return null;
 }
@@ -125,6 +241,24 @@ function findElementByText(selectors, pattern) {
       }
     }
   }
+  return null;
+}
+
+function findClickableByText(pattern) {
+  const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, 'i');
+  const candidates = Array.from(document.querySelectorAll('button, a, input, [role="button"], .cursor-pointer, .app-action, .actions *, form *'));
+  const matches = candidates
+    .filter(el => isVisible(el) && regex.test(normalizeText(el.textContent || el.value || '')))
+    .sort((a, b) => {
+      const aRect = a.getBoundingClientRect();
+      const bRect = b.getBoundingClientRect();
+      return (aRect.width * aRect.height) - (bRect.width * bRect.height);
+    });
+
+  for (const el of matches) {
+    return el.closest('button, a, [role="button"], .cursor-pointer, .app-action, form') || el;
+  }
+
   return null;
 }
 
@@ -246,13 +380,34 @@ function findNewButton() {
 function findRandomButton() {
   return findElementByText(
     [
+      'form[wire\\:submit\\.prevent="random"] input[value="Random"]',
+      'form[wire\\:submit\\.prevent="random"] input[value="Create a Random Email"]',
       'form[wire\\:submit\\.prevent="random"] input[type="submit"]',
       'form[wire\\:submit\\.prevent="random"] button',
       '.app-action input[type="submit"]',
       '.app-action button',
+      'input[type="submit"]',
+      'button',
+      '[role="button"]',
     ],
     /random|create a random email|随机|创建随机电子邮件/i
-  );
+  ) || findClickableByText(/^random$/i);
+}
+
+function submitLivewireFormFromControl(control) {
+  const form = control?.closest?.('form');
+  if (form && typeof form.requestSubmit === 'function') {
+    form.requestSubmit(control.matches('button, input[type="submit"]') ? control : undefined);
+    return true;
+  }
+
+  return false;
+}
+
+function clickOrSubmitControl(control) {
+  if (!control) return;
+  if (submitLivewireFormFromControl(control)) return;
+  simulateClick(control);
 }
 
 function findRefreshButton() {
@@ -283,19 +438,34 @@ async function fetchBurnerEmail(payload = {}) {
 
   const previousEmail = currentEmail;
   const newButton = findNewButton();
-  if (!newButton) {
+  if (!newButton && !findRandomButton()) {
     throw new Error('Could not find the Burner Mailbox "New" button.');
   }
 
-  await humanPause(300, 900);
-  simulateClick(newButton);
-  log('Burner Mailbox: Opened new mailbox panel');
-  await sleep(700);
+  if (newButton) {
+    await humanPause(300, 900);
+    simulateClick(newButton);
+    log('Burner Mailbox: Opened new mailbox panel');
+    await sleep(700);
+  } else {
+    log('Burner Mailbox: Random email panel already open');
+  }
 
   const randomButton = await waitForRandomButton(10000);
   await humanPause(300, 900);
-  simulateClick(randomButton);
+  clickOrSubmitControl(randomButton);
   log('Burner Mailbox: Clicked random email creation');
+  await sleep(300);
+
+  const createButton = findElementByText(
+    ['form[wire\\:submit\\.prevent="create"] input[type="submit"]', 'form[wire\\:submit\\.prevent="create"] button', 'input[type="submit"]', 'button'],
+    /^create$/i
+  );
+  if (createButton && createButton !== randomButton) {
+    await humanPause(150, 350);
+    clickOrSubmitControl(createButton);
+    log('Burner Mailbox: Clicked create email button');
+  }
 
   await waitForMailboxActions(15000, { detectChallenge: true });
   const copyButton = findCopyButton();
@@ -323,14 +493,18 @@ async function prepareBurnerEmail(payload = {}) {
   }
 
   const newButton = findNewButton();
-  if (!newButton) {
+  if (!newButton && !findRandomButton()) {
     throw new Error('Could not find the Burner Mailbox "New" button.');
   }
 
-  await humanPause(250, 700);
-  simulateClick(newButton);
-  log('Burner Mailbox: Opened new mailbox panel');
-  await sleep(700);
+  if (newButton) {
+    await humanPause(250, 700);
+    simulateClick(newButton);
+    log('Burner Mailbox: Opened new mailbox panel');
+    await sleep(700);
+  } else {
+    log('Burner Mailbox: Random email panel already open');
+  }
 
   return {
     ok: true,
@@ -344,8 +518,19 @@ async function clickRandomBurnerEmail(payload = {}) {
 
   const randomButton = await waitForRandomButton(10000, { detectChallenge: true });
   await humanPause(250, 700);
-  simulateClick(randomButton);
+  clickOrSubmitControl(randomButton);
   log('Burner Mailbox: Clicked random email creation');
+  await sleep(300);
+
+  const createButton = findElementByText(
+    ['form[wire\\:submit\\.prevent="create"] input[type="submit"]', 'form[wire\\:submit\\.prevent="create"] button', 'input[type="submit"]', 'button'],
+    /^create$/i
+  );
+  if (createButton && createButton !== randomButton) {
+    await humanPause(150, 350);
+    clickOrSubmitControl(createButton);
+    log('Burner Mailbox: Clicked create email button');
+  }
 
   return {
     ok: true,
@@ -429,9 +614,7 @@ async function waitForMailboxActions(timeout = 15000, options = {}) {
     }
 
     const email = getVisibleMailboxEmail();
-    const copyButton = findCopyButton();
-    const refreshButton = findRefreshButton();
-    if (email && (copyButton || refreshButton)) {
+    if (email) {
       return;
     }
 
@@ -442,7 +625,7 @@ async function waitForMailboxActions(timeout = 15000, options = {}) {
 }
 
 function getMailboxRows() {
-  return Array.from(document.querySelectorAll('.mailbox .list [data-id], .messages [data-id]'));
+  return Array.from(document.querySelectorAll('.mailbox .list [data-id], .messages [data-id], .tm-message-row'));
 }
 
 function getRowId(row) {
@@ -475,17 +658,11 @@ async function refreshMailbox() {
 
 async function extractCodeFromRow(row) {
   const rowId = getRowId(row);
-  const rowCode = extractVerificationCode(getRowText(row));
+  const rowCode = extractOpenAIVerificationCode(getRowText(row));
   if (rowCode) return rowCode;
-  if (!rowId) return null;
 
   simulateClick(row);
-  await sleep(500);
-
-  const detailTextarea = document.querySelector(`#message-${CSS.escape(rowId)} textarea`)
-    || document.querySelector('.message textarea');
-  const detailText = detailTextarea?.value || detailTextarea?.textContent || '';
-  const detailCode = extractVerificationCode(detailText);
+  const detailCode = await waitForDetailCode(rowId);
 
   const backButton = findElementByText(
     ['.message [x-on\\:click]', '.message button', '.message .cursor-pointer'],

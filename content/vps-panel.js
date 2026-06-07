@@ -46,7 +46,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleStep(step, payload) {
   switch (step) {
-    case 1: return await step1_getOAuthLink();
+    case 1: return await step1_getOAuthLink(payload);
     case 9: return await step9_vpsVerify(payload);
     default:
       throw new Error(`vps-panel.js does not handle step ${step}`);
@@ -57,8 +57,10 @@ async function handleStep(step, payload) {
 // Step 1: Get OAuth Link
 // ============================================================
 
-async function step1_getOAuthLink() {
+async function step1_getOAuthLink(payload = {}) {
   log('Step 1: Waiting for VPS panel to load (auto-login may take a moment)...');
+  await ensureCpaManagementLoggedIn(payload.cpaManagementKey);
+  navigateToOAuthRoute();
 
   // The page may start at #/login and auto-redirect to #/oauth.
   // Wait for the Codex OAuth card to appear (up to 30s for auto-login + redirect).
@@ -106,6 +108,102 @@ async function step1_getOAuthLink() {
 
   log(`Step 1: OAuth URL obtained: ${oauthUrl.slice(0, 80)}...`, 'ok');
   reportComplete(1, { oauthUrl });
+}
+
+function navigateToOAuthRoute() {
+  if (location.hash === '#/oauth') return;
+
+  log('Step 1: Navigating CPA panel to OAuth page...');
+  location.hash = '#/oauth';
+}
+
+async function ensureCpaManagementLoggedIn(cpaManagementKey = '') {
+  const key = (cpaManagementKey || '').trim();
+  const loginInput = await waitForCpaLoginInput(10000);
+
+  if (!loginInput) return;
+  if (!key) {
+    throw new Error('CPA management key is required. Fill CPA Key in the Side Panel first.');
+  }
+
+  log('Step 1: CPA login page detected, filling management key...');
+  fillInput(loginInput, key);
+
+  const rememberBox = document.querySelector('input[type="checkbox"]');
+  if (rememberBox && !rememberBox.checked) {
+    simulateClick(rememberBox);
+  }
+
+  const loginButton = document.querySelector('button.btn-primary.btn-full')
+    || await waitForElementByText('button', /login|登录|登入/i, 5000).catch(() => null);
+  if (!loginButton) {
+    throw new Error('CPA login button not found.');
+  }
+
+  await waitForCpaButtonEnabled(loginButton, 5000);
+  await humanPause(300, 800);
+  simulateClick(loginButton);
+  log('Step 1: CPA login submitted');
+
+  await sleep(1200);
+  navigateToOAuthRoute();
+
+  await waitForElementByText('.card-header', /codex/i, 30000).catch(() => {
+    throw new Error('CPA login did not reach Codex OAuth page. Check CPA Key.');
+  });
+}
+
+async function waitForCpaButtonEnabled(button, timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+    if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') return;
+    await sleep(150);
+  }
+}
+
+async function waitForCpaLoginInput(timeout = 10000) {
+  const selector = [
+    'input[type="password"]',
+    'input[placeholder*="管理密钥"]',
+    'input[placeholder*="management" i]',
+    'input[placeholder*="key" i]',
+    'input.input',
+  ].join(', ');
+
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+    const loginInput = Array.from(document.querySelectorAll(selector)).find(input => {
+      const text = [
+        input.placeholder || '',
+        input.name || '',
+        input.id || '',
+        input.type || '',
+        input.getAttribute('aria-label') || '',
+      ].join(' ');
+
+      return isCpaElementVisible(input)
+        && /password|管理密钥|management|key/i.test(text);
+    });
+
+    if (loginInput) return loginInput;
+
+    if (document.querySelector('.card-header') || /#\/oauth/.test(location.hash)) {
+      return null;
+    }
+
+    await sleep(250);
+  }
+
+  return null;
+}
+
+function isCpaElementVisible(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
 }
 
 // ============================================================

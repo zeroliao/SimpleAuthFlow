@@ -18,6 +18,8 @@ const inputPassword = document.getElementById('input-password');
 const btnFetchEmail = document.getElementById('btn-fetch-email');
 const btnTogglePassword = document.getElementById('btn-toggle-password');
 const btnToggleVps = document.getElementById('btn-toggle-vps');
+const inputCpaKey = document.getElementById('input-cpa-key');
+const btnToggleCpaKey = document.getElementById('btn-toggle-cpa-key');
 const btnStop = document.getElementById('btn-stop');
 const btnReset = document.getElementById('btn-reset');
 const stepsProgress = document.getElementById('steps-progress');
@@ -30,7 +32,7 @@ const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const inputRunCount = document.getElementById('input-run-count');
 let autoContinueMode = 'email';
-const DEFAULT_VPS_URL = 'http://127.0.0.1:5173/#/oauth';
+const DEFAULT_VPS_URL = 'http://127.0.0.1:8317/management.html#/oauth';
 
 // ============================================================
 // Toast Notifications
@@ -85,6 +87,7 @@ async function restoreState() {
     }
     syncPasswordField(state);
     inputVpsUrl.value = state.vpsUrl || DEFAULT_VPS_URL;
+    inputCpaKey.value = state.cpaManagementKey || '';
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -332,9 +335,14 @@ function syncPasswordToggleLabel() {
   btnTogglePassword.textContent = inputPassword.type === 'password' ? 'Show' : 'Hide';
 }
 
+function syncCpaKeyToggleLabel() {
+  btnToggleCpaKey.textContent = inputCpaKey.type === 'password' ? 'Show' : 'Hide';
+}
+
 async function syncPanelInputsToState() {
   const email = inputEmail.value.trim();
   const vpsUrl = inputVpsUrl.value.trim();
+  const cpaManagementKey = inputCpaKey.value;
   const customPassword = inputPassword.value;
 
   if (email) {
@@ -344,7 +352,7 @@ async function syncPanelInputsToState() {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
     source: 'sidepanel',
-    payload: { vpsUrl, customPassword },
+    payload: { vpsUrl, cpaManagementKey, customPassword },
   });
 }
 
@@ -377,6 +385,11 @@ btnFetchEmail.addEventListener('click', async () => {
 btnTogglePassword.addEventListener('click', () => {
   inputPassword.type = inputPassword.type === 'password' ? 'text' : 'password';
   syncPasswordToggleLabel();
+});
+
+btnToggleCpaKey.addEventListener('click', () => {
+  inputCpaKey.type = inputCpaKey.type === 'password' ? 'text' : 'password';
+  syncCpaKeyToggleLabel();
 });
 
 btnToggleVps.addEventListener('click', () => {
@@ -445,6 +458,7 @@ btnReset.addEventListener('click', async () => {
     displayLocalhostUrl.classList.remove('has-value');
     inputEmail.value = '';
     inputVpsUrl.value = DEFAULT_VPS_URL;
+    inputCpaKey.value = '';
     displayStatus.textContent = 'Ready';
     statusBar.className = 'status-bar';
     logArea.innerHTML = '';
@@ -480,6 +494,14 @@ inputVpsUrl.addEventListener('change', async () => {
   if (vpsUrl) {
     await chrome.runtime.sendMessage({ type: 'SAVE_SETTING', source: 'sidepanel', payload: { vpsUrl } });
   }
+});
+
+inputCpaKey.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { cpaManagementKey: inputCpaKey.value },
+  });
 });
 
 inputPassword.addEventListener('change', async () => {
@@ -648,6 +670,7 @@ btnTheme.addEventListener('click', () => {
 initTheme();
 restoreState().then(() => {
   syncPasswordToggleLabel();
+  syncCpaKeyToggleLabel();
   syncVpsToggleLabel();
   updateButtonStates();
   refreshContinueButton();

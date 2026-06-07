@@ -35,6 +35,7 @@ const DEFAULT_STATE = {
   tabRegistry: {},
   logs: [],
   vpsUrl: '',
+  cpaManagementKey: '',
   customPassword: '',
 };
 
@@ -57,7 +58,11 @@ async function initializeSessionStorageAccess() {
 }
 
 async function setState(updates) {
-  console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
+  const logUpdates = { ...updates };
+  if (logUpdates.cpaManagementKey) logUpdates.cpaManagementKey = '[redacted]';
+  if (logUpdates.customPassword) logUpdates.customPassword = '[redacted]';
+  if (logUpdates.password) logUpdates.password = '[redacted]';
+  console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(logUpdates).slice(0, 200));
   await chrome.storage.session.set(updates);
 }
 
@@ -88,6 +93,7 @@ async function resetState() {
     'accounts',
     'tabRegistry',
     'vpsUrl',
+    'cpaManagementKey',
     'customPassword',
   ]);
   await chrome.storage.session.clear();
@@ -99,6 +105,7 @@ async function resetState() {
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     vpsUrl: prev.vpsUrl || '',
+    cpaManagementKey: prev.cpaManagementKey || '',
     customPassword: prev.customPassword || '',
   });
 }
@@ -625,6 +632,7 @@ async function handleMessage(message, sender) {
     case 'SAVE_SETTING': {
       const updates = {};
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
+      if (message.payload.cpaManagementKey !== undefined) updates.cpaManagementKey = message.payload.cpaManagementKey;
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
       await setState(updates);
       return { ok: true };
@@ -1024,6 +1032,18 @@ async function fetchBurnerEmail(options = {}) {
           }
           return null;
         };
+        const submitLivewireFormFromControl = (control) => {
+          const form = control?.closest?.('form');
+          if (form && typeof form.requestSubmit === 'function') {
+            form.requestSubmit(control.matches('button, input[type="submit"]') ? control : undefined);
+            return true;
+          }
+          return false;
+        };
+        const clickOrSubmitControl = (control) => {
+          if (submitLivewireFormFromControl(control)) return;
+          control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        };
         const detectChallenge = () => {
           const title = normalizeText(document.title);
           const bodyText = normalizeText(document.body?.innerText || document.body?.textContent || '');
@@ -1072,31 +1092,60 @@ async function fetchBurnerEmail(options = {}) {
           return { email: previousEmailValue, generated: false };
         }
 
-        const newButton = findByText(
-          ['.actions .cursor-pointer', '.actions div', '.actions button', '.actions a'],
-          /^(new|新的)$|new email|新邮件/i
-        );
-        if (!newButton) {
-          return { error: 'Fallback could not find Burner Mailbox New button.' };
-        }
+        const randomButtonSelectors = [
+          'form[wire\\:submit\\.prevent="random"] input[value="Random"]',
+          'form[wire\\:submit\\.prevent="random"] input[value="Create a Random Email"]',
+          'form[wire\\:submit\\.prevent="random"] input[type="submit"]',
+          'form[wire\\:submit\\.prevent="random"] button',
+          '.app-action input[type="submit"]',
+          '.app-action button',
+          'input[type="submit"]',
+          'button',
+          '[role="button"]',
+        ];
 
-        newButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        await sleep(900);
-
-        const randomButton = findByText(
-          [
-            'form[wire\\:submit\\.prevent="random"] input[type="submit"]',
-            'form[wire\\:submit\\.prevent="random"] button',
-            '.app-action input[type="submit"]',
-            '.app-action button',
-          ],
+        let randomButton = findByText(
+          randomButtonSelectors,
           /random|create a random email|随机|创建随机电子邮件/i
         );
+
+        if (!randomButton) {
+          const newButton = findByText(
+            ['.actions .cursor-pointer', '.actions div', '.actions button', '.actions a'],
+            /^(new|新的)$|new email|新邮件/i
+          );
+          if (!newButton) {
+            return { error: 'Fallback could not find Burner Mailbox New or random-email button.' };
+          }
+
+          newButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          await sleep(900);
+
+          randomButton = findByText(
+            randomButtonSelectors,
+            /random|create a random email|随机|创建随机电子邮件/i
+          );
+        }
+
         if (!randomButton) {
           return { error: 'Fallback could not find Burner Mailbox random-email button.' };
         }
 
-        randomButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        clickOrSubmitControl(randomButton);
+        await sleep(300);
+
+        const createButton = findByText(
+          [
+            'form[wire\\:submit\\.prevent="create"] input[type="submit"]',
+            'form[wire\\:submit\\.prevent="create"] button',
+            'input[type="submit"]',
+            'button',
+          ],
+          /^create$/i
+        );
+        if (createButton && createButton !== randomButton) {
+          clickOrSubmitControl(createButton);
+        }
 
         for (let i = 0; i < 80; i++) {
           if (detectChallenge()) {
@@ -1215,6 +1264,7 @@ async function prepareStateForFreshAutoRun(run) {
   const prevState = await getState();
   const keepSettings = {
     vpsUrl: prevState.vpsUrl,
+    cpaManagementKey: prevState.cpaManagementKey,
     customPassword: prevState.customPassword,
     autoRunning: true,
     autoRunCurrentRun: run,
@@ -1404,7 +1454,7 @@ async function executeStep1(state) {
     type: 'EXECUTE_STEP',
     step: 1,
     source: 'background',
-    payload: {},
+    payload: { cpaManagementKey: state.cpaManagementKey },
   });
 }
 
